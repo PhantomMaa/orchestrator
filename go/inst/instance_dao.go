@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/go-sql-driver/mysql"
 	"regexp"
 	"runtime"
 	"sort"
@@ -29,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/openark/golib/log"
 	"github.com/openark/golib/math"
@@ -754,7 +755,28 @@ func ReadTopologyInstanceBufferable(instanceKey *InstanceKey, bufferWrites bool,
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			err := db.QueryRow(config.Config.DetectDataCenterQuery).Scan(&instance.DataCenter)
+			var (
+				netWork = "tcp"
+			)
+			// if config.Config.HostnameResolveMethod == "none" {
+			//     QueryDataCenterSql := fmt.Sprintf("select data_center from meta_table where physical_ip = '%s' and port = '%s'", instanceKey.Hostname, instanceKey.Port)
+			// } else {
+			//     QueryDataCenterSql := fmt.Sprintf("select data_center from meta_table where hostname = '%s' and port = '%s'", instanceKey.Hostname, instanceKey.Port)
+			// }
+			QueryDataCenterSql := config.Config.DetectDataCenterQuery
+			if strings.Contains(QueryDataCenterSql, "dc_vaild_host_flag") {
+				HostPort := fmt.Sprintf("%d", instanceKey.Port)
+				QueryDataCenterSql = strings.Replace(QueryDataCenterSql, "dc_vaild_host_flag", instanceKey.Hostname, 1)
+				QueryDataCenterSql = strings.Replace(QueryDataCenterSql, "dc_vaild_port_flag", HostPort, 1)
+			}
+			dsn := fmt.Sprintf("%s:%s@%s(%s:%d)/%s", config.Config.MySQLTopologyUser, config.Config.MySQLTopologyPassword, netWork, config.Config.MetaDBHost, config.Config.MetaDBPort, config.Config.MetaDBName)
+			DB, err1 := sql.Open("mysql", dsn)
+			if err1 != nil {
+				fmt.Printf("open meta db failed, err: %v \n", err1)
+			}
+			defer DB.Close()
+			err := DB.QueryRow(QueryDataCenterSql).Scan(&instance.DataCenter)
+			//err := db.QueryRow(config.Config.DetectDataCenterQuery).Scan(&instance.DataCenter)
 			logReadTopologyInstanceError(instanceKey, "DetectDataCenterQuery", err)
 		}()
 	}
@@ -864,8 +886,31 @@ func ReadTopologyInstanceBufferable(instanceKey *InstanceKey, bufferWrites bool,
 		if instance.SuggestedClusterAlias == "" {
 			// Only need to do on masters
 			if config.Config.DetectClusterAliasQuery != "" {
+				//clusterAlias := ""
+				//if err := db.QueryRow(config.Config.DetectClusterAliasQuery).Scan(&clusterAlias); err != nil {
+				//	logReadTopologyInstanceError(instanceKey, "DetectClusterAliasQuery", err)
+				//} else {
+				//	instance.SuggestedClusterAlias = clusterAlias
+				//}
+				var (
+					netWork        = "tcp"
+					DbtoolAliasSQL string
+				)
+				DbtoolAliasSQL = config.Config.DetectClusterAliasQuery
+				if strings.Contains(DbtoolAliasSQL, "dc_vaild_host_flag") {
+					HostPort := fmt.Sprintf("%d", instanceKey.Port)
+					DbtoolAliasSQL = strings.Replace(DbtoolAliasSQL, "dc_vaild_host_flag", instanceKey.Hostname, 1)
+					DbtoolAliasSQL = strings.Replace(DbtoolAliasSQL, "dc_vaild_port_flag", HostPort, 1)
+				}
+				dsn := fmt.Sprintf("%s:%s@%s(%s:%d)/%s", config.Config.MySQLTopologyUser, config.Config.MySQLTopologyPassword, netWork, config.Config.MetaDBHost, config.Config.MetaDBPort, config.Config.MetaDBName)
+				DB, err1 := sql.Open("mysql", dsn)
+				if err1 != nil {
+					fmt.Printf("open meta db failed, err: %v \n", err1)
+				}
+				defer DB.Close()
+				// Only need to do on masters
 				clusterAlias := ""
-				if err := db.QueryRow(config.Config.DetectClusterAliasQuery).Scan(&clusterAlias); err != nil {
+				if err := DB.QueryRow(DbtoolAliasSQL).Scan(&clusterAlias); err != nil {
 					logReadTopologyInstanceError(instanceKey, "DetectClusterAliasQuery", err)
 				} else {
 					instance.SuggestedClusterAlias = clusterAlias
@@ -882,8 +927,24 @@ func ReadTopologyInstanceBufferable(instanceKey *InstanceKey, bufferWrites bool,
 	}
 	if instance.ReplicationDepth == 0 && config.Config.DetectClusterDomainQuery != "" && !isMaxScale {
 		// Only need to do on masters
+		var (
+			netWork      = "tcp"
+			DbtoolVIPSQL string
+		)
+		DbtoolVIPSQL = config.Config.DetectClusterDomainQuery
+		if strings.Contains(DbtoolVIPSQL, "dc_vaild_host_flag") {
+			HostPort := fmt.Sprintf("%d", instanceKey.Port)
+			DbtoolVIPSQL = strings.Replace(DbtoolVIPSQL, "dc_vaild_host_flag", instanceKey.Hostname, 1)
+			DbtoolVIPSQL = strings.Replace(DbtoolVIPSQL, "dc_vaild_port_flag", HostPort, 1)
+		}
+		dsn := fmt.Sprintf("%s:%s@%s(%s:%d)/%s", config.Config.MySQLTopologyUser, config.Config.MySQLTopologyPassword, netWork, config.Config.MetaDBHost, config.Config.MetaDBPort, config.Config.MetaDBName)
+		DB, err1 := sql.Open("mysql", dsn)
+		if err1 != nil {
+			fmt.Printf("open meta db failed, err: %v \n", err1)
+		}
+		defer DB.Close()
 		domainName := ""
-		if err := db.QueryRow(config.Config.DetectClusterDomainQuery).Scan(&domainName); err != nil {
+		if err := DB.QueryRow(DbtoolVIPSQL).Scan(&domainName); err != nil {
 			domainName = ""
 			logReadTopologyInstanceError(instanceKey, "DetectClusterDomainQuery", err)
 		}
@@ -1120,9 +1181,9 @@ func (this byNamePort) Less(i, j int) bool {
 }
 
 // BulkReadInstance returns a list of all instances from the database
-// - I only need the Hostname and Port fields.
-// - I must use readInstancesByCondition to ensure all column
-//   settings are correct.
+//   - I only need the Hostname and Port fields.
+//   - I must use readInstancesByCondition to ensure all column
+//     settings are correct.
 func BulkReadInstance() ([](*InstanceKey), error) {
 	// no condition (I want all rows) and no sorting (but this is done by Hostname, Port anyway)
 	const (
